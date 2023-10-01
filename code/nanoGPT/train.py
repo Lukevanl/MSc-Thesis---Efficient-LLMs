@@ -21,7 +21,7 @@ import time
 import math
 import pickle
 from contextlib import nullcontext
-
+from retnet import RetNet, retnet_1_3b
 import numpy as np
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -33,6 +33,7 @@ from model import GPTConfig, GPT
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
 out_dir = 'out'
+architecture = 'retnet'  # 'retnet' or 'transformer'
 eval_interval = 200
 log_interval = 1
 eval_iters = 200
@@ -150,8 +151,19 @@ if init_from == 'scratch':
     if meta_vocab_size is None:
         print("defaulting to vocab_size of GPT-2 to 50304 (50257 rounded up for efficiency)")
     model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else 50304
-    gptconf = GPTConfig(**model_args)
-    model = GPT(gptconf)
+    if architecture == 'transformer':
+        gptconf = GPTConfig(**model_args)
+        model = GPT(gptconf)
+    else:
+        model = RetNet(
+        num_tokens=50304,
+        d_model=n_embd,
+        nhead=n_head,
+        num_layers=n_layer,
+        dim_feedforward=n_embd * 4,
+        device=device,
+        dtype=torch.bfloat16,
+    )
 elif init_from == 'resume':
     print(f"Resuming training from {out_dir}")
     # resume training from a checkpoint.
@@ -190,7 +202,7 @@ if block_size < model.config.block_size:
 model.to(device)
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
-scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
+scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'f<<loat16'))
 
 # optimizer
 optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
