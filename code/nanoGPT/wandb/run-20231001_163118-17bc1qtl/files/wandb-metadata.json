@@ -1,0 +1,53 @@
+{
+    "os": "Windows-10-10.0.22621-SP0",
+    "python": "3.9.18",
+    "heartbeatAt": "2023-10-01T14:31:20.499685",
+    "startedAt": "2023-10-01T14:31:18.787837",
+    "docker": null,
+    "cuda": null,
+    "args": [],
+    "state": "running",
+    "program": "c:\\Users\\lukev\\OneDrive\\Documents\\RetNet_repo\\MSc-Thesis---Efficient-LLMs\\code\\nanoGPT\\train.py",
+    "codePathLocal": "train.py",
+    "codePath": "code\\nanoGPT\\train.py",
+    "git": {
+        "remote": "git@github.com:Lukevanl/MSc-Thesis---Efficient-LLMs.git",
+        "commit": "151cbdd8f84f93ba56c9ec07e51da4dcb099862b"
+    },
+    "email": "lukevl2203@gmail.com",
+    "root": "C:/Users/lukev/OneDrive/Documents/RetNet_repo/MSc-Thesis---Efficient-LLMs",
+    "host": "lukespc",
+    "username": "lukev",
+    "executable": "C:\\Users\\lukev\\anaconda3\\envs\\MScThesis\\python.exe",
+    "cpu_count": 8,
+    "cpu_count_logical": 16,
+    "cpu_freq": {
+        "current": 3201.0,
+        "min": 0.0,
+        "max": 3201.0
+    },
+    "cpu_freq_per_core": [
+        {
+            "current": 3201.0,
+            "min": 0.0,
+            "max": 3201.0
+        }
+    ],
+    "disk": {
+        "/": {
+            "total": 952.9560508728027,
+            "used": 939.7966079711914
+        }
+    },
+    "gpu": "NVIDIA GeForce RTX 3070 Laptop GPU",
+    "gpu_count": 1,
+    "gpu_devices": [
+        {
+            "name": "NVIDIA GeForce RTX 3070 Laptop GPU",
+            "memory_total": 8589934592
+        }
+    ],
+    "memory": {
+        "total": 31.345191955566406
+    }
+}

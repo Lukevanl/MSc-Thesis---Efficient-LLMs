@@ -1,10 +1,12 @@
 from copy import deepcopy
 from typing import Callable, List, Optional, Sequence, Tuple, Union
-
+import math
+import inspect
 import torch
 from einops import rearrange
 from torch import Tensor, nn
 from torch.nn import functional as F
+from dataclasses import dataclass
 
 from retention import (
     ActivationString,
@@ -184,9 +186,20 @@ class RetNetDecoder(nn.Module):
         return self.forward_parallel(x)
 
 
+@dataclass
+class RetNetConfig:
+    block_size: int = 1024
+    vocab_size: int = 50304 # GPT-2 vocab_size of 50257, padded up to nearest multiple of 64 for efficiency
+    n_layer: int = 12
+    n_head: int = 12
+    n_embd: int = 768
+    dropout: float = 0.0
+    bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
+
 class RetNet(nn.Module):
     def __init__(
         self,
+        config,
         num_tokens: int,  # usually obtained from the tokenizer
         d_model: int = 512,
         nhead: int = 8,
@@ -201,6 +214,7 @@ class RetNet(nn.Module):
     ) -> None:
         super().__init__()
         self.d_model = d_model
+        self.config = config
         self.num_layers = num_layers
         self.embedding = nn.Embedding(num_tokens, d_model, device=device, dtype=dtype)
         decoder_layer = RetNetDecoderLayer(
@@ -249,7 +263,7 @@ class RetNet(nn.Module):
         x = self.out(x)
         return x, states
 
-    def forward(self, inputs: Tensor, labels: Tensor) -> Tensor:
+    def forward(self, inputs: Tensor, targets: Tensor) -> Tensor:
         logits = self.forward_parallel(inputs)
         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
         return logits, loss
@@ -281,20 +295,7 @@ class RetNet(nn.Module):
         return optimizer
 
     def estimate_mfu(self, fwdbwd_per_iter, dt):
-        """ estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS """
-        # first estimate the number of flops we do per iteration.
-        # see PaLM paper Appendix B as ref: https://arxiv.org/abs/2204.02311
-        N = self.get_num_params()
-        cfg = self.config
-        L, H, Q, T = cfg.n_layer, cfg.n_head, cfg.n_embd//cfg.n_head, cfg.block_size
-        flops_per_token = 6*N + 12*L*H*Q*T
-        flops_per_fwdbwd = flops_per_token * T
-        flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
-        # express our flops throughput as ratio of A100 bfloat16 peak flops
-        flops_achieved = flops_per_iter * (1.0/dt) # per second
-        flops_promised = 312e12 # A100 GPU bfloat16 peak flops is 312 TFLOPS
-        mfu = flops_achieved / flops_promised
-        return mfu
+        return 0
 
 
 def retnet_1_3b(

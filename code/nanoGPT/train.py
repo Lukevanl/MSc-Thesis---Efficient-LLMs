@@ -21,7 +21,7 @@ import time
 import math
 import pickle
 from contextlib import nullcontext
-from retnet import RetNet, retnet_1_3b
+from retnet import RetNet, retnet_1_3b, RetNetConfig
 import numpy as np
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -33,17 +33,17 @@ from model import GPTConfig, GPT
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
 out_dir = 'out'
-architecture = 'retnet'  # 'retnet' or 'transformer'
-eval_interval = 200
+architecture = 'transformer'  # 'retnet' or 'transformer'
+eval_interval = 50
 log_interval = 1
 eval_iters = 200
 eval_only = False # if True, script exits right after the first eval
-always_save_checkpoint = True # if True, always save a checkpoint after each eval
+always_save_checkpoint = False # if True, always save a checkpoint after each eval
 init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
 # wandb logging
-wandb_log = False # disabled by default
-wandb_project = 'owt'
-wandb_run_name = 'gpt2' # 'run' + str(time.time())
+wandb_log = True # disabled by default
+wandb_project = 'MSc thesis'
+wandb_run_name = f'{architecture}' # 'run' + str(time.time())
 # data
 dataset = 'shakespeare'
 gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
@@ -155,7 +155,8 @@ if init_from == 'scratch':
         gptconf = GPTConfig(**model_args)
         model = GPT(gptconf)
     else:
-        model = RetNet(
+        retnetConfig = RetNetConfig(**model_args)
+        model = RetNet(retnetConfig, 
         num_tokens=50304,
         d_model=n_embd,
         nhead=n_head,
@@ -253,7 +254,7 @@ def get_lr(it):
 # logging
 if wandb_log and master_process:
     import wandb
-    wandb.init(project=wandb_project, name=wandb_run_name, config=config)
+    wandb.init(project=wandb_project, name=wandb_run_name, config=config, entity='lukevl2203')
 
 # training loop
 X, Y = get_batch('train') # fetch the very first batch
