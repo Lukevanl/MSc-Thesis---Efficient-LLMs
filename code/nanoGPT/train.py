@@ -46,8 +46,8 @@ wandb_run_name = 'gpt2' # 'run' + str(time.time())
 # data
 dataset = 'shakespeare'
 gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
-batch_size = 12 # if gradient_accumulation_steps > 1, this is the micro-batch size
-block_size = 256
+batch_size = 4 # if gradient_accumulation_steps > 1, this is the micro-batch size
+block_size = 2048
 # model
 n_layer = 2
 n_head = 8
