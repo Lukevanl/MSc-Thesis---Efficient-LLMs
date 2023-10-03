@@ -22,6 +22,7 @@ import math
 import pickle
 from contextlib import nullcontext
 from retnet import RetNet, retnet_1_3b, RetNetConfig
+from vanilla_transformer import TransformerLM, TransformerConfig
 import numpy as np
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -33,8 +34,8 @@ from model import GPTConfig, GPT
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
 out_dir = 'out'
-architecture = 'transformer'  # 'retnet' or 'transformer'
-eval_interval = 50
+architecture = 'retnet'  # 'retnet' or 'transformer' or 'nanogpt'
+eval_interval = 100
 log_interval = 1
 eval_iters = 200
 eval_only = False # if True, script exits right after the first eval
@@ -45,10 +46,10 @@ wandb_log = True # disabled by default
 wandb_project = 'MSc thesis'
 wandb_run_name = f'{architecture}' # 'run' + str(time.time())
 # data
-dataset = 'shakespeare'
+dataset = 'openwebtext'                             
 gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
 batch_size = 4 # if gradient_accumulation_steps > 1, this is the micro-batch size
-block_size = 2048
+block_size = 1024
 # model
 n_layer = 2
 n_head = 8
@@ -57,7 +58,7 @@ dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 # adamw optimizer
 learning_rate = 6e-4 # max learning rate
-max_iters = 600 # total number of training iterations
+max_iters = 600000 # total number of training iterations
 weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95
@@ -78,6 +79,7 @@ config_keys = [k for k,v in globals().items() if not k.startswith('_') and isins
 #exec(open('configurator.py').read()) # overrides from command line or config file
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
 # -----------------------------------------------------------------------------
+print(dtype)
 
 # various inits, derived attributes, I/O setup
 ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
@@ -151,10 +153,10 @@ if init_from == 'scratch':
     if meta_vocab_size is None:
         print("defaulting to vocab_size of GPT-2 to 50304 (50257 rounded up for efficiency)")
     model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else 50304
-    if architecture == 'transformer':
+    if architecture == 'nanogpt':
         gptconf = GPTConfig(**model_args)
         model = GPT(gptconf)
-    else:
+    elif architecture == 'retnet':
         retnetConfig = RetNetConfig(**model_args)
         model = RetNet(retnetConfig, 
         num_tokens=50304,
@@ -165,6 +167,19 @@ if init_from == 'scratch':
         device=device,
         dtype=torch.bfloat16,
     )
+    else:
+        tfConfig = TransformerConfig(**model_args)
+        model = TransformerLM(tfConfig,
+        num_tokens=50304,
+        d_model=n_embd,
+        nhead=n_head,
+        num_layers=n_layer,
+        dim_feedforward=n_embd * 4,
+        max_batch_size = batch_size,
+        max_seq_length = block_size,
+        device=device,
+        dtype=torch.bfloat16,
+        )
 elif init_from == 'resume':
     print(f"Resuming training from {out_dir}")
     # resume training from a checkpoint.
@@ -263,7 +278,6 @@ local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
 running_mfu = -1.0
 while True:
-
     # determine and set the learning rate for this iteration
     lr = get_lr(iter_num) if decay_lr else learning_rate
     for param_group in optimizer.param_groups:
@@ -312,7 +326,7 @@ while True:
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = get_batch('train')
         # backward pass, with gradient scaling if training in fp16
-        scaler.scale(loss).backward()
+        scaler.scale(loss).backward(retain_graph=True)
     # clip the gradient
     if grad_clip != 0.0:
         scaler.unscale_(optimizer)
