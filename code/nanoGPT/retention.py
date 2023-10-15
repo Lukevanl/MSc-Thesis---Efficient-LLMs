@@ -403,6 +403,8 @@ class MultiScaleRetention(nn.Module):
             assert self.thetas is not None
             indices = torch.arange(q.size(2), device=q.device, dtype=q.dtype)
             indices = rearrange(indices, "n -> () () n ()")
+            #print(indices)
+            #print(indices.shape)
             thetas = rearrange(self.thetas, "d -> () () () d")
             angles = indices * thetas
             sin = torch.sin(angles)

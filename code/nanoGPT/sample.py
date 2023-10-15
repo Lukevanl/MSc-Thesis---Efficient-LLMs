@@ -5,21 +5,27 @@ import os
 import pickle
 from contextlib import nullcontext
 import torch
+import time
 import tiktoken
 from model import GPTConfig, GPT
+from vanilla_transformer import TransformerLM, TransformerConfig
+from retnet import RetNet, retnet_1_3b, RetNetConfig
 
 # -----------------------------------------------------------------------------
 init_from = 'resume' # either 'resume' (from an out_dir) or a gpt2 variant (e.g. 'gpt2-xl')
 out_dir = 'out' # ignored if init_from is not 'resume'
 start = "\n" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
-num_samples = 10 # number of samples to draw
-max_new_tokens = 500 # number of tokens generated in each sample
-temperature = 0.8 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
-top_k = 200 # retain only the top_k most likely tokens, clamp others to have 0 probability
+num_samples = 2 # number of samples to draw
+max_new_tokens = 10000 # number of tokens generated in each sample
+temperature = 1 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
+top_k = 20 # retain only the top_k most likely tokens, clamp others to have 0 probability
 seed = 1337
+model_name = 'ckpt_t_2048.pt'
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32' or 'bfloat16' or 'float16'
 compile = False # use PyTorch 2.0 to compile the model to be faster
+isRetnet = False
+isTransformer = True
 exec(open('configurator.py').read()) # overrides from command line or config file
 # -----------------------------------------------------------------------------
 
@@ -34,10 +40,32 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 # model
 if init_from == 'resume':
     # init from a model saved in a specific directory
-    ckpt_path = os.path.join(out_dir, 'ckpt.pt')
+    ckpt_path = os.path.join(out_dir, model_name)
     checkpoint = torch.load(ckpt_path, map_location=device)
-    gptconf = GPTConfig(**checkpoint['model_args'])
-    model = GPT(gptconf)
+    print(checkpoint['model_args'])
+    if isRetnet:
+        conf = RetNetConfig(**checkpoint['model_args'])
+        print(conf)
+        model = RetNet(conf, 
+        num_tokens=50304,
+        d_model=conf.n_embd,
+        nhead=conf.n_head,
+        num_layers=conf.n_layer,
+        dim_feedforward=conf.n_embd * 4)
+        device=device
+    elif isTransformer:
+        conf = TransformerConfig(**checkpoint['model_args'])
+        print(conf)
+        model = TransformerLM(conf, 
+        num_tokens=50304,
+        d_model=conf.n_embd,
+        nhead=conf.n_head,
+        num_layers=conf.n_layer,
+        dim_feedforward=conf.n_embd * 4)
+        device=device
+    else:
+        gptconf = GPTConfig(**checkpoint['model_args'])
+        model = GPT(gptconf)
     state_dict = checkpoint['model']
     unwanted_prefix = '_orig_mod.'
     for k,v in list(state_dict.items()):
@@ -81,9 +109,17 @@ start_ids = encode(start)
 x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
 
 # run generation
+time_per_sample = []
 with torch.no_grad():
     with ctx:
         for k in range(num_samples):
+            start = time.time()
             y = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
+            #print(y)
             print(decode(y[0].tolist()))
+            end = time.time()
             print('---------------')
+            duration = end - start
+            print(f"Elapsed time: {duration}")
+            time_per_sample.append(duration)
+print(time_per_sample)

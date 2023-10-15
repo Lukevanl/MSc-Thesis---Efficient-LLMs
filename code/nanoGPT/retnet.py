@@ -1,8 +1,10 @@
 from copy import deepcopy
 from typing import Callable, List, Optional, Sequence, Tuple, Union
 import math
+import time
 import inspect
 import torch
+torch.set_printoptions(threshold=10000000)
 from einops import rearrange
 from torch import Tensor, nn
 from torch.nn import functional as F
@@ -209,12 +211,14 @@ class RetNet(nn.Module):
         dim_feedforward: int = 2048,
         norm_first: bool = True,
         layer_norm_eps: float = 1e-6,
-        device: Optional[Union[torch.device, str]] = None,
+        device: Optional[Union[torch.device, str]] = 'cuda',
         dtype: Optional[torch.dtype] = None,
     ) -> None:
         super().__init__()
         self.d_model = d_model
+        self.vocab_size = num_tokens
         self.config = config
+        self.device=device
         self.num_layers = num_layers
         self.embedding = nn.Embedding(num_tokens, d_model, device=device, dtype=dtype)
         decoder_layer = RetNetDecoderLayer(
@@ -263,11 +267,18 @@ class RetNet(nn.Module):
         x = self.out(x)
         return x, states
 
-    def forward(self, inputs: Tensor, targets: Tensor) -> Tensor:
-        logits = self.forward_parallel(inputs)
-        loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
-        return logits, loss
-    
+    def forward(self, inputs: Tensor, targets=None, reccurent=False, seq_idx=None, prev_state=None) -> Tensor:
+        if reccurent:
+            logits, state = self.forward_recurrent(inputs, seq_idx, prev_state)
+            return logits, state
+        else:
+            logits = self.forward_parallel(inputs)
+        if targets == None:
+            return logits, None
+        else:
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            return logits, loss
+        
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
         # start with all of the candidate parameters
         param_dict = {pn: p for pn, p in self.named_parameters()}
@@ -296,6 +307,55 @@ class RetNet(nn.Module):
 
     def estimate_mfu(self, fwdbwd_per_iter, dt):
         return 0
+    
+    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None, prev_state=None):
+        prev_state=None
+        for i in range(max_new_tokens):
+            # if the sequence context is growing too long we must crop it at block_size
+            idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+            logits, prev_state = self.forward_recurrent(idx_cond[:, min(i, self.config.block_size - 1)], i, prev_state)
+            logits = logits / temperature
+            # optionally crop the logits to only the top k options
+            if top_k is not None:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = -float('Inf')
+            # apply softmax to convert logits to (normalized) probabilities
+            probs = F.softmax(logits, dim=-1)
+            # sample from the distribution
+            idx_next = torch.multinomial(probs, num_samples=1).to(self.device)
+            #idx_next = rearrange(idx_next, "d -> () d")
+            # append sampled index to the running sequence and continue
+            idx = torch.cat((idx, idx_next), dim=1)
+
+        return idx
+    
+    def generate_parallel(self, idx, max_new_tokens, temperature=1.0, top_k=None, prev_state=None):
+        """
+        Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
+        the sequence max_new_tokens times, feeding the predictions back into the model each time.
+        Most likely you'll want to make sure to be in model.eval() mode of operation for this.
+        """
+        for _ in range(max_new_tokens):
+            # if the sequence context is growing too long we must crop it at block_size
+            idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+            # forward the model to get the logits for the index in the sequence
+            logits, _ = self(idx_cond)
+            #print(logits.shape)
+            # pluck the logits at the final step and scale by desired temperature
+            logits = logits[:, -1, :] / temperature
+            # optionally crop the logits to only the top k options
+            if top_k is not None:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = -float('Inf')
+            # apply softmax to convert logits to (normalized) probabilities
+            probs = F.softmax(logits, dim=-1)
+            # sample from the distribution
+            idx_next = torch.multinomial(probs, num_samples=1)
+            # append sampled index to the running sequence and continue
+            idx = torch.cat((idx, idx_next), dim=1)
+
+        return idx
+
 
 
 def retnet_1_3b(
@@ -367,7 +427,8 @@ if __name__ == "__main__":
 
     size = (batch_size, seq_len)
     x = torch.randint(0, num_tokens, size=size, device=device)
-    net = RetNet(
+    cfg = {}
+    net = RetNet(cfg,
         num_tokens=num_tokens,
         d_model=d_model,
         nhead=nhead,
@@ -385,5 +446,4 @@ if __name__ == "__main__":
         y_recurrent[:, i], prev_states = net.forward_recurrent(
             xr, seq_idx=i, prev_states=prev_states
         )
-
     torch.testing.assert_close(y_parallel, y_recurrent)
