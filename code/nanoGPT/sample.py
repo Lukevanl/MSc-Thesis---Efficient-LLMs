@@ -19,7 +19,7 @@ num_samples = 2 # number of samples to draw
 max_new_tokens = 10000 # number of tokens generated in each sample
 temperature = 1 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
 top_k = 20 # retain only the top_k most likely tokens, clamp others to have 0 probability
-seed = 1337
+seed = 10
 model_name = 'ckpt_t_2048.pt'
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32' or 'bfloat16' or 'float16'
@@ -114,7 +114,7 @@ with torch.no_grad():
     with ctx:
         for k in range(num_samples):
             start = time.time()
-            y = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
+            y = model.generate(x, max_new_tokens, temperature=temperature)
             #print(y)
             print(decode(y[0].tolist()))
             end = time.time()
@@ -123,3 +123,4 @@ with torch.no_grad():
             print(f"Elapsed time: {duration}")
             time_per_sample.append(duration)
 print(time_per_sample)
+print(sum(time_per_sample) / len(time_per_sample))
