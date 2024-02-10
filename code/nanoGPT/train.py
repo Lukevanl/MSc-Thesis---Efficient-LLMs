@@ -35,30 +35,36 @@ from model import GPTConfig, GPT
 # I/O
 out_dir = 'out'
 architecture = 'retnet'  # 'retnet' or 'transformer' or 'nanogpt'
+if architecture == 'retnet':
+    train_chunkwise = True
+else:
+    train_chunkwise = False
+#train_chunkwise = False
 eval_interval = 25
 log_interval = 1
-eval_iters = 200
+eval_iters = 100
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = False # if True, always save a checkpoint after each eval
 init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
+resume_ckpt = 'ckpt_q.pt'
+# data
+dataset = 'shakespeare'                          
+gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
+batch_size = 1  # if gradient_accumulation_steps > 1, this is the micro-batch size
+block_size = 4096
 # wandb logging
 wandb_log = True # disabled by default
 wandb_project = 'MSc thesis'
-wandb_run_name = f'{architecture}' # 'run' + str(time.time())
-# data
-dataset = 'shakespeare'                             
-gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
-batch_size = 1  # if gradient_accumulation_steps > 1, this is the micro-batch size
-block_size = 2048
+wandb_run_name = f'{architecture}_{dataset}_{block_size}' # 'run' + str(time.time())   
 # model
 n_layer = 4
 n_head = 16
-n_embd = 256
+n_embd = 512
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 # adamw optimizer
 learning_rate = 6e-4 # max learning rate
-max_iters = 2000 # total number of training iterations
+max_iters = 20000 # total number of training iterations
 weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95
@@ -66,7 +72,7 @@ grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
 # learning rate decay settings
 decay_lr = False # whether to decay the learning rate
 warmup_iters = 0 # how many steps to warm up for
-lr_decay_iters = 2000 # should be ~= max_iters per Chinchilla
+lr_decay_iters = 20000 # should be ~= max_iters per Chinchilla
 min_lr = 6e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
 # DDP settings
 backend = 'nccl' # 'nccl', 'gloo', etc.
@@ -80,6 +86,9 @@ config_keys = [k for k,v in globals().items() if not k.startswith('_') and isins
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
 # -----------------------------------------------------------------------------
 print(dtype)
+print(torch.cuda.is_available())
+print(torch.cuda.current_device())
+print(torch.cuda.get_device_name(0))
 
 # various inits, derived attributes, I/O setup
 ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
@@ -163,7 +172,7 @@ if init_from == 'scratch':
         d_model=n_embd,
         nhead=n_head,
         num_layers=n_layer,
-        dim_feedforward=n_embd * 4,
+        dim_feedforward=n_embd * 2,
         device=device,
         dtype=torch.bfloat16,
     )
@@ -174,7 +183,7 @@ if init_from == 'scratch':
         d_model=n_embd,
         nhead=n_head,
         num_layers=n_layer,
-        dim_feedforward=n_embd * 4,
+        dim_feedforward=n_embd * 2,
         max_batch_size = batch_size,
         max_seq_length = block_size,
         device=device,
@@ -183,7 +192,7 @@ if init_from == 'scratch':
 elif init_from == 'resume':
     print(f"Resuming training from {out_dir}")
     # resume training from a checkpoint.
-    ckpt_path = os.path.join(out_dir, 'ckpt.pt')
+    ckpt_path = os.path.join(out_dir, resume_ckpt)
     checkpoint = torch.load(ckpt_path, map_location=device)
     checkpoint_model_args = checkpoint['model_args']
     # force these config attributes to be equal otherwise we can't even resume training
@@ -191,8 +200,33 @@ elif init_from == 'resume':
     for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
         model_args[k] = checkpoint_model_args[k]
     # create the model
-    gptconf = GPTConfig(**model_args)
-    model = GPT(gptconf)
+    if architecture == 'nanogpt':
+        gptconf = GPTConfig(**model_args)
+        model = GPT(gptconf)
+    elif architecture == 'retnet':
+        retnetConfig = RetNetConfig(**model_args)
+        model = RetNet(retnetConfig, 
+        num_tokens=50304,
+        d_model=n_embd,
+        nhead=n_head,
+        num_layers=n_layer,
+        dim_feedforward=n_embd * 2,
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    else:
+        tfConfig = TransformerConfig(**model_args)
+        model = TransformerLM(tfConfig,
+        num_tokens=50304,
+        d_model=n_embd,
+        nhead=n_head,
+        num_layers=n_layer,
+        dim_feedforward=n_embd * 2,
+        max_batch_size = batch_size,
+        max_seq_length = block_size,
+        device=device,
+        dtype=torch.bfloat16,
+        )
     state_dict = checkpoint['model']
     # fix the keys of the state dictionary :(
     # honestly no idea how checkpoints sometimes get this prefix, have to debug more
@@ -200,7 +234,7 @@ elif init_from == 'resume':
     for k,v in list(state_dict.items()):
         if k.startswith(unwanted_prefix):
             state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
-    model.load_state_dict(state_dict)
+    model.load_state_dict(state_dict, strict=False)
     iter_num = checkpoint['iter_num']
     best_val_loss = checkpoint['best_val_loss']
 elif init_from.startswith('gpt2'):
@@ -307,7 +341,7 @@ while True:
                     'config': config,
                 }
                 print(f"saving checkpoint to {out_dir}")
-                torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
+                torch.save(checkpoint, os.path.join(out_dir, 'ckpt_nano.pt'))
     if iter_num == 0 and eval_only:
         break
 
@@ -321,7 +355,10 @@ while True:
             # looking at the source of that context manager, it just toggles this variable
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
-            logits, loss = model(X, Y)
+            if train_chunkwise:
+                logits, loss = model(X, Y, chunkwise=train_chunkwise)
+            else:
+                logits, loss = model(X, Y)
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = get_batch('train')

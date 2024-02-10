@@ -20,12 +20,12 @@ max_new_tokens = 10000 # number of tokens generated in each sample
 temperature = 1 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
 top_k = 20 # retain only the top_k most likely tokens, clamp others to have 0 probability
 seed = 10
-model_name = 'ckpt_t_2048.pt'
+model_name = 'ckpt_r_2048.pt'
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32' or 'bfloat16' or 'float16'
 compile = False # use PyTorch 2.0 to compile the model to be faster
-isRetnet = False
-isTransformer = True
+isRetnet = True
+isTransformer = False
 exec(open('configurator.py').read()) # overrides from command line or config file
 # -----------------------------------------------------------------------------
 
@@ -42,9 +42,9 @@ if init_from == 'resume':
     # init from a model saved in a specific directory
     ckpt_path = os.path.join(out_dir, model_name)
     checkpoint = torch.load(ckpt_path, map_location=device)
-    print(checkpoint['model_args'])
     if isRetnet:
         conf = RetNetConfig(**checkpoint['model_args'])
+        conf.n_embd = int(conf.n_embd)
         print(conf)
         model = RetNet(conf, 
         num_tokens=50304,
@@ -71,7 +71,7 @@ if init_from == 'resume':
     for k,v in list(state_dict.items()):
         if k.startswith(unwanted_prefix):
             state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
-    model.load_state_dict(state_dict)
+    model.load_state_dict(state_dict, strict=False)
 elif init_from.startswith('gpt2'):
     # init from a given GPT-2 model
     model = GPT.from_pretrained(init_from, dict(dropout=0.0))
@@ -114,7 +114,7 @@ with torch.no_grad():
     with ctx:
         for k in range(num_samples):
             start = time.time()
-            y = model.generate(x, max_new_tokens, temperature=temperature)
+            y = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
             #print(y)
             print(decode(y[0].tolist()))
             end = time.time()

@@ -3,6 +3,7 @@ from typing import List, Optional, Sequence, Tuple, Union
 import inspect
 import plotly.graph_objects as go
 import torch
+import json
 from torch import Tensor, nn
 from torch.nn import functional as F
 from dataclasses import dataclass
@@ -80,6 +81,9 @@ class TransformerLM(nn.Module):
             logits = self.out(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
             loss = None
         return logits, loss
+    
+    def toJson(self):
+        return json.dumps(self, default=lambda o: o.__dict__)
     
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
         # start with all of the candidate parameters

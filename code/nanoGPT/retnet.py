@@ -8,6 +8,7 @@ torch.set_printoptions(threshold=10000000)
 from einops import rearrange
 from torch import Tensor, nn
 from torch.nn import functional as F
+import json
 from dataclasses import dataclass
 
 from retention import (
@@ -236,6 +237,9 @@ class RetNet(nn.Module):
         self.out = nn.Linear(d_model, num_tokens, device=device, dtype=dtype)
 
         self._reset_parameters()
+    
+    def toJson(self):
+        return json.dumps(self, default=lambda o: o.__dict__)
 
     def _reset_parameters(self):
         nn.init.xavier_normal_(self.out.weight)
@@ -267,10 +271,20 @@ class RetNet(nn.Module):
         x = self.out(x)
         return x, states
 
-    def forward(self, inputs: Tensor, targets=None, reccurent=False, seq_idx=None, prev_state=None) -> Tensor:
+    def forward(self, inputs: Tensor, targets=None, reccurent=False, seq_idx=None, prev_state=None, chunkwise=False) -> Tensor:
         if reccurent:
             logits, state = self.forward_recurrent(inputs, seq_idx, prev_state)
             return logits, state
+        elif chunkwise:
+                outputs = []  # container for collecting chunk-wise outputs
+                prev_states = []  # cache layer states after each step
+                chunk_size = 2048  # number of tokens in each chunk
+                for idx in range(0, self.config.block_size, chunk_size):
+                    out, prev_states = self.forward_chunkwise(
+                        inputs[:, idx : idx + chunk_size], idx, prev_states
+                    )
+                    outputs.append(out)
+                logits = torch.cat(outputs, dim=1)
         else:
             logits = self.forward_parallel(inputs)
         if targets == None:
