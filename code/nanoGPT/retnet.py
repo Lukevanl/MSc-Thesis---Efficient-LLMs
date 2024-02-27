@@ -271,14 +271,14 @@ class RetNet(nn.Module):
         x = self.out(x)
         return x, states
 
-    def forward(self, inputs: Tensor, targets=None, reccurent=False, seq_idx=None, prev_state=None, chunkwise=False) -> Tensor:
+    def forward(self, inputs: Tensor, targets=None, reccurent=False, seq_idx=None, prev_state=None, chunkwise=False, kd=False) -> Tensor:
         if reccurent:
             logits, state = self.forward_recurrent(inputs, seq_idx, prev_state)
             return logits, state
         elif chunkwise:
                 outputs = []  # container for collecting chunk-wise outputs
                 prev_states = []  # cache layer states after each step
-                chunk_size = 2048  # number of tokens in each chunk
+                chunk_size = 512  # number of tokens in each chunk
                 for idx in range(0, self.config.block_size, chunk_size):
                     out, prev_states = self.forward_chunkwise(
                         inputs[:, idx : idx + chunk_size], idx, prev_states
