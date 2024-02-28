@@ -35,22 +35,22 @@ from model import GPTConfig, GPT
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
 out_dir = 'out'
-finetune = False
+finetune = True
 architecture = 'retnet'  # 'retnet' or 'transformer' or 'nanogpt'
 if architecture == 'retnet':
     train_chunkwise = True
 else:
     train_chunkwise = False
 #train_chunkwise = False
-eval_interval = 50
-log_interval = 5
+eval_interval = 5
+log_interval = 1
 eval_iters = 100
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = False # if True, always save a checkpoint after each eval
-init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
-resume_ckpt = 'ckpt_q.pt'
+init_from = 'resume' # 'scratch' or 'resume' or 'gpt2*'
+resume_ckpt = 'ckpt_medical.pt'
 # data
-dataset = 'note'                          
+dataset = 'mednli'                          
 gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
 batch_size = 1  # if gradient_accumulation_steps > 1, this is the micro-batch size
 block_size = 2048
@@ -64,7 +64,7 @@ n_head = 32
 n_embd = 512
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 if finetune:
-    dropout = 0.25
+    dropout = 0.5
 bias = False # do we use bias inside LayerNorm and Linear layers?
 # adamw optimizer
 learning_rate = 6e-4 # max learning rate
@@ -131,9 +131,9 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 data_dir = os.path.join('data', dataset)
 if finetune:
     with open(os.path.join(data_dir, 'train_gpt.json')) as f_train:
-        train_data = json.load(f_train)
-    with open(os.path.join(data_dir, 'train_gpt.json')) as f_dev:
-        val_data = json.load(f_dev)
+        train_data = json.loads(f_train.read())
+    with open(os.path.join(data_dir, 'dev_gpt.json')) as f_dev:
+        val_data = json.loads(f_dev.read())
 else:
     train_data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
     val_data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
@@ -151,11 +151,10 @@ def get_batch(split):
 
 def get_batch_finetune(split):
     # Similar to get_batch but for loading fine-tuning data which is more structured
-    #TODO
     data = train_data if split == 'train' else val_data
     ix = torch.randint(len(data['context']), (batch_size,))
     x = torch.stack([torch.from_numpy((np.array(data['context'][i] + data['target'][i][:-1], dtype=np.uint16)).astype(np.int64)) for i in ix])
-    y = torch.stack([torch.from_numpy((np.array(data['context'][i][1:] + data['target'][i], dtype=np.uint16)).astype(np.int64)) for i in ix])
+    y = torch.stack([torch.from_numpy((np.array(data['context'][i][1:] +  data['target'][i], dtype=np.uint16)).astype(np.int64)) for i in ix])
     if device_type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
@@ -260,7 +259,8 @@ elif init_from == 'resume':
             state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
     model.load_state_dict(state_dict, strict=False)
     iter_num = checkpoint['iter_num']
-    best_val_loss = checkpoint['best_val_loss']
+    if not finetune:
+        best_val_loss = checkpoint['best_val_loss']
 elif init_from.startswith('gpt2'):
     print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
     # initialize from OpenAI GPT-2 weights
@@ -371,7 +371,7 @@ while True:
                     'config': config,
                 }
                 print(f"saving checkpoint to {out_dir}")
-                torch.save(checkpoint, os.path.join(out_dir, 'ckpt_medical.pt'))
+                torch.save(checkpoint, os.path.join(out_dir, 'ckpt_medical_finetune.pt'))
     if iter_num == 0 and eval_only:
         break
 
@@ -391,7 +391,10 @@ while True:
                 logits, loss = model(X, Y)
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
-        X, Y = get_batch('train')
+        if finetune: 
+            X, Y = get_batch_finetune('train')
+        else:
+            X, Y = get_batch('train')
         # backward pass, with gradient scaling if training in fp16
         scaler.scale(loss).backward(retain_graph=True)
     # clip the gradient
