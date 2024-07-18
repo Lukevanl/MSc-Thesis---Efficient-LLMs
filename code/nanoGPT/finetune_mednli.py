@@ -17,6 +17,8 @@ $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123
 """
 
 import os
+from torch.nn import functional as F
+import json
 import time
 import math
 import pickle
@@ -25,7 +27,6 @@ from retnet import RetNet, retnet_1_3b, RetNetConfig
 from vanilla_transformer import TransformerLM, TransformerConfig
 import numpy as np
 import torch
-import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
@@ -35,26 +36,22 @@ from model import GPTConfig, GPT
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
 out_dir = 'out'
+finetune = True
 architecture = 'retnet'  # 'retnet' or 'transformer' or 'nanogpt'
 if architecture == 'retnet':
     train_chunkwise = True
 else:
     train_chunkwise = False
-#Specify teacher architecture and whether to aplly chunkwise training
-teacher_architecture = 'retnet'
-if teacher_architecture == 'retnet':
-    teacher_train_chunkwise = True
-else:
-    teacher_train_chunkwise = False
 #train_chunkwise = False
-eval_interval = 100
-log_interval = 5
+eval_interval = 25
+log_interval = 1
 eval_iters = 200
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = False # if True, always save a checkpoint after each eval
-init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
+init_from = 'resume' # 'scratch' or 'resume' or 'gpt2*'
+resume_ckpt = 'ckpt.pt'
 # data
-dataset = 'note'
+dataset = 'mednli'
 gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
 batch_size = 1  # if gradient_accumulation_steps > 1, this is the micro-batch size
 block_size = 4096
@@ -62,24 +59,17 @@ block_size = 4096
 wandb_log = True # disabled by default
 wandb_project = 'MSc thesis'
 wandb_run_name = 'run' + str(time.time())   
-
-#Student model
+# model
 n_layer = 20
 n_head = 20
 n_embd = 480
-
-#Teacher model
-n_layer_t = 25
-n_head_t = 25
-n_embd_t = 1000
-ckpt_teacher = 'ckpt_teacher.pt'
-T=2
-
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
+if finetune:
+    dropout = 0.25
 bias = False # do we use bias inside LayerNorm and Linear layers?
 # adamw optimizer
 learning_rate = 6e-4 # max learning rate
-max_iters = 20000 # total number of training iterations
+max_iters = 200000 # total number of training iterations
 weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95
@@ -87,7 +77,7 @@ grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
 # learning rate decay settings
 decay_lr = False # whether to decay the learning rate
 warmup_iters = 0 # how many steps to warm up for
-lr_decay_iters = 20000 # should be ~= max_iters per Chinchilla
+lr_decay_iters = 200000 # should be ~= max_iters per Chinchilla
 min_lr = 6e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
 # DDP settings
 backend = 'nccl' # 'nccl', 'gloo', etc.
@@ -140,13 +130,49 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 
 # poor man's data loader
 data_dir = os.path.join('data', dataset)
-train_data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
-val_data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
+if finetune:
+    with open(os.path.join(data_dir, 'train_gpt.json')) as f_train:
+        train_data = json.loads(f_train.read())
+    with open(os.path.join(data_dir, 'dev_gpt.json')) as f_dev:
+        val_data = json.loads(f_dev.read())
+else:
+    print(os.getcwd())
+    print(os.path.join(data_dir, 'train.bin'))
+    train_data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
+    val_data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
+
 def get_batch(split):
     data = train_data if split == 'train' else val_data
     ix = torch.randint(len(data) - block_size, (batch_size,))
     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
     y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
+    if device_type == 'cuda':
+        # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
+        x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
+    else:
+        x, y = x.to(device), y.to(device)
+    return x, y
+
+# def get_batch_finetune(split):
+#     # Similar to get_batch but for loading fine-tuning data which is more structured
+#     data = train_data if split == 'train' else val_data
+#     ix = torch.randint(len(data['context']), (batch_size,))
+#     x = torch.stack([torch.from_numpy((np.array(data['context'][i] + data['target'][i][:-1], dtype=np.uint16)).astype(np.int64)) for i in ix])
+#     y = torch.stack([torch.from_numpy((np.array(data['context'][i][1:] +  data['target'][i], dtype=np.uint16)).astype(np.int64)) for i in ix])
+#     print(x, y)
+#     if device_type == 'cuda':
+#         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
+#         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
+#     else:
+#         x, y = x.to(device), y.to(device)
+#     return x, y
+
+def get_batch_finetune(split):
+    # Similar to get_batch but for loading fine-tuning data which is more structured
+    data = train_data if split == 'train' else val_data
+    ix = torch.randint(len(data['context']), (batch_size,))
+    x = torch.stack([torch.from_numpy((np.array(data['context'][i] + data['target'][i][:-1], dtype=np.uint16)).astype(np.int64)) for i in ix])
+    y = torch.stack([torch.from_numpy((np.array(data['target'][i][-1], dtype=np.uint16)).astype(np.int64)) for i in ix])
     if device_type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
@@ -170,8 +196,6 @@ if os.path.exists(meta_path):
 # model init
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
                   bias=bias, vocab_size=None, dropout=dropout) # start with model_args from command line
-model_args_t = dict(n_layer=n_layer_t, n_head=n_head_t, n_embd=n_embd_t, block_size=block_size,
-                  bias=bias, vocab_size=None, dropout=dropout)
 if init_from == 'scratch':
     # init a new model from scratch
     print("Initializing a new model from scratch")
@@ -191,7 +215,8 @@ if init_from == 'scratch':
         num_layers=n_layer,
         dim_feedforward=n_embd * 2,
         device=device,
-        dtype=torch.bfloat16)
+        dtype=torch.bfloat16,
+    )
     else:
         tfConfig = TransformerConfig(**model_args)
         model = TransformerLM(tfConfig,
@@ -205,54 +230,81 @@ if init_from == 'scratch':
         device=device,
         dtype=torch.bfloat16,
         )
-
-model_args_t['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else 50304
-ckpt_path_teacher = os.path.join(out_dir, ckpt_teacher)
-checkpoint = torch.load(ckpt_path_teacher, map_location=device)
-print(checkpoint['best_val_loss'])
-checkpoint_model_args = checkpoint['model_args']
-for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
-        model_args_t[k] = checkpoint_model_args[k]
-
-if architecture == 'retnet':
-        retnetConfig_t = RetNetConfig(**model_args_t)
-        teacher_model = RetNet(retnetConfig_t, 
+elif init_from == 'resume':
+    print(f"Resuming training from {out_dir}")
+    # resume training from a checkpoint.
+    ckpt_path = os.path.join(out_dir, resume_ckpt)
+    checkpoint = torch.load(ckpt_path, map_location=device)
+    checkpoint_model_args = checkpoint['model_args']
+    best_val_loss = checkpoint['best_val_loss']
+    print(best_val_loss)
+    print(checkpoint_model_args)
+    # force these config attributes to be equal otherwise we can't even resume training
+    # the rest of the attributes (e.g. dropout) can stay as desired from command line
+    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
+        model_args[k] = checkpoint_model_args[k]
+    # create the model
+    if architecture == 'nanogpt':
+        gptconf = GPTConfig(**model_args)
+        gptconf.dropout = dropout
+        model = GPT(gptconf)
+    elif architecture == 'retnet':
+        retnetConfig = RetNetConfig(**model_args)
+        model = RetNet(retnetConfig, 
         num_tokens=50304,
-        d_model=n_embd_t,
-        nhead=n_head_t,
-        num_layers=n_layer_t,
-        dim_feedforward=n_embd_t * 2,
+        d_model=n_embd,
+        nhead=n_head,
+        num_layers=n_layer,
+        dim_feedforward=n_embd * 2,
         device=device,
         dtype=torch.bfloat16,
+        dropout=dropout,
     )
-else:
-        tfConfig_t = TransformerConfig(**model_args_t)
-        teacher_model = TransformerLM(tfConfig_t,
+    else:
+        tfConfig = TransformerConfig(**model_args)
+        model = TransformerLM(tfConfig,
         num_tokens=50304,
-        d_model=n_embd_t,
-        nhead=n_head_t,
-        num_layers=n_layer_t,
-        dim_feedforward=n_embd_t * 2,
+        d_model=n_embd,
+        nhead=n_head,
+        num_layers=n_layer,
+        dim_feedforward=n_embd * 2,
         max_batch_size = batch_size,
         max_seq_length = block_size,
         device=device,
         dtype=torch.bfloat16,
+        dropout=dropout,
         )
-state_dict = checkpoint['model']
-unwanted_prefix = '_orig_mod.'
-for k,v in list(state_dict.items()):
-    if k.startswith(unwanted_prefix):
-        state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
-teacher_model.load_state_dict(state_dict, strict=False)
-print(teacher_model)
-    
+    state_dict = checkpoint['model']
+    # fix the keys of the state dictionary :(
+    # honestly no idea how checkpoints sometimes get this prefix, have to debug more
+    unwanted_prefix = '_orig_mod.'
+    for k,v in list(state_dict.items()):
+        if k.startswith(unwanted_prefix):
+            state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
+    model.load_state_dict(state_dict, strict=False)
+    iter_num = checkpoint['iter_num']
+    if not finetune:
+        best_val_loss = checkpoint['best_val_loss']
+elif init_from.startswith('gpt2'):
+    print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
+    # initialize from OpenAI GPT-2 weights
+    override_args = dict(dropout=dropout)
+    model = GPT.from_pretrained(init_from, override_args)
+    # read off the created config params, so we can store them into checkpoint correctly
+    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
+        model_args[k] = getattr(model.config, k)
 # crop down the model block size if desired, using model surgery
 if block_size < model.config.block_size:
     model.crop_block_size(block_size)
     model_args['block_size'] = block_size # so that the checkpoint will have the right value
 model.to(device)
-teacher_model.to(device)
-teacher_model.eval()
+pp=0
+for p in list(model.parameters()):
+    nn=1
+    for s in list(p.size()):
+        nn = nn*s
+    pp += nn
+print(pp)
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
@@ -268,7 +320,6 @@ if compile:
     print("compiling the model... (takes a ~minute)")
     unoptimized_model = model
     model = torch.compile(model) # requires PyTorch 2.0
-    teacher_model = torch.compile(teacher_model)
 
 # wrap model into DDP container
 if ddp:
@@ -282,9 +333,21 @@ def estimate_loss():
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
-            X, Y = get_batch(split)
+            if finetune:
+                X, Y = get_batch_finetune(split)
+            else:
+                X, Y = get_batch(split)
             with ctx:
-                logits, loss = model(X, Y)
+                if finetune:
+                    x = (torch.tensor(X[0], dtype=torch.long, device=device)[None, ...])
+                    logits = model(x)
+                    last_logits = logits[0][0][-1]
+                    loss = F.cross_entropy(last_logits, Y[0], ignore_index=-1)
+                    probs = F.softmax(last_logits, dim=-1)
+                    # sample from the distribution
+                    idx_next = torch.multinomial(probs, num_samples=1)
+                else:
+                    logits, loss = model(X, Y, finetune=finetune)
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
@@ -310,7 +373,10 @@ if wandb_log and master_process:
     wandb.init(project=wandb_project, name=wandb_run_name, config=config, entity='lukevl2203')
 
 # training loop
-X, Y = get_batch('train') # fetch the very first batch
+if finetune:
+    X, Y = get_batch_finetune('train')
+else:
+    X, Y = get_batch('train') # fetch the very first batch
 t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
@@ -345,7 +411,7 @@ while True:
                     'config': config,
                 }
                 print(f"saving checkpoint to {out_dir}")
-                torch.save(checkpoint, os.path.join(out_dir, 'ckpt_out.pt'))
+                torch.save(checkpoint, os.path.join(out_dir, f'out_ckpt.pt'))
     if iter_num == 0 and eval_only:
         break
 
@@ -359,19 +425,26 @@ while True:
             # looking at the source of that context manager, it just toggles this variable
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
-            logits, regular_loss = model(X, Y, chunkwise=train_chunkwise)
-            #Losses of teacher model
-            logits_teacher, _ = teacher_model(X, chunkwise=teacher_train_chunkwise)
-            #Apply softmax and 
-            soft_teacher = nn.functional.softmax(logits_teacher / T, dim=-1)
-            soft_student = nn.functional.log_softmax(logits / T, dim=-1)
-            soft_targets_loss = -torch.sum(soft_teacher * soft_student) / soft_student.size()[0] * (T**2)
-            if micro_step % 20 == 0:
-                print(regular_loss, soft_targets_loss)
-            loss = 0.0001 * soft_targets_loss + 0.9999 * regular_loss
+            if finetune:
+                x = (torch.tensor(X[0], dtype=torch.long, device=device)[None, ...])
+                logits = model(x)
+                last_logits = logits[0][0][-1]
+                probs = F.softmax(last_logits, dim=-1)
+                # sample from the distribution
+                idx_next = torch.multinomial(probs, num_samples=1)
+                print(idx_next, Y[0])
+                loss = F.cross_entropy(last_logits, Y[0], ignore_index=-1)
+            else:
+                if train_chunkwise:
+                    logits, loss = model(X, Y, chunkwise=train_chunkwise)
+                else:
+                    logits, loss = model(X, Y)
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
-        X, Y = get_batch('train')
+        if finetune: 
+            X, Y = get_batch_finetune('train')
+        else:
+            X, Y = get_batch('train')
         # backward pass, with gradient scaling if training in fp16
         scaler.scale(loss).backward(retain_graph=True)
     # clip the gradient
@@ -405,3 +478,4 @@ while True:
 
 if ddp:
     destroy_process_group()
+

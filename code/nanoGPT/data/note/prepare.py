@@ -2,20 +2,30 @@ import os
 import requests
 import tiktoken
 import numpy as np
+print('welcome!')
+input_file_path_dis = os.path.join(os.path.dirname(__file__), 'discharge.csv/discharge.csv')
 
-# download the tiny shakespeare dataset
-input_file_path = os.path.join(os.path.dirname(__file__), 'discharge.csv/discharge.csv')
-# if not os.path.exists(input_file_path):
-#     data_url = 'https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt'
-    # with open(input_file_path, 'w') as f:
-    #     f.write(requests.get(data_url).text)
-
-with open(input_file_path, 'r') as f:
+with open(input_file_path_dis, 'r') as f:
     data = f.read()
 n = len(data)
 print(f'size of data: {n}')
 train_data = data[:int(n*0.9995)]
 val_data = data[int(n*0.9995):]
+print(len(train_data), len(val_data))
+
+input_file_path_rad = os.path.join(os.path.dirname(__file__), 'radiology.csv/radiology.csv')
+
+with open(input_file_path_rad, 'r') as f:
+    data = f.read()
+n = len(data)
+print(f'size of data: {n}')
+train_data_rad = data[:int(n*0.9995)]
+val_data_rad = data[int(n*0.9995):]
+print(len(train_data_rad), len(val_data_rad))
+
+train_data += train_data_rad
+val_data += val_data_rad
+
 print(len(train_data), len(val_data))
 
 # encode with tiktoken gpt2 bpe

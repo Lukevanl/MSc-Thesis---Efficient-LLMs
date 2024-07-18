@@ -15,7 +15,7 @@ $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 --master_addr=123.456.123
 $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123.456 --master_port=1234 train.py
 (If your cluster does not have Infiniband interconnect prepend NCCL_IB_DISABLE=1)
 """
-
+import time
 import os
 import json
 import time
@@ -35,33 +35,33 @@ from model import GPTConfig, GPT
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
 out_dir = 'out'
-finetune = True
+finetune = False
 architecture = 'retnet'  # 'retnet' or 'transformer' or 'nanogpt'
 if architecture == 'retnet':
     train_chunkwise = True
 else:
     train_chunkwise = False
 #train_chunkwise = False
-eval_interval = 5
-log_interval = 1
-eval_iters = 100
+eval_interval = 100
+log_interval = 5
+eval_iters = 200
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = False # if True, always save a checkpoint after each eval
-init_from = 'resume' # 'scratch' or 'resume' or 'gpt2*'
+init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
 resume_ckpt = 'ckpt_medical.pt'
 # data
-dataset = 'mednli'                          
+dataset = 'note'                          
 gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
 batch_size = 1  # if gradient_accumulation_steps > 1, this is the micro-batch size
-block_size = 2048
+block_size = 4096
 # wandb logging
 wandb_log = True # disabled by default
 wandb_project = 'MSc thesis'
-wandb_run_name = f'{architecture}_{dataset}_{block_size}' # 'run' + str(time.time())   
+wandb_run_name = 'run' + str(time.time())
 # model
-n_layer = 4
-n_head = 32
-n_embd = 512
+n_layer = 25
+n_head = 25
+n_embd = 1000
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 if finetune:
     dropout = 0.5
@@ -137,6 +137,7 @@ if finetune:
 else:
     train_data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
     val_data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
+
 def get_batch(split):
     data = train_data if split == 'train' else val_data
     ix = torch.randint(len(data) - block_size, (batch_size,))
@@ -155,6 +156,7 @@ def get_batch_finetune(split):
     ix = torch.randint(len(data['context']), (batch_size,))
     x = torch.stack([torch.from_numpy((np.array(data['context'][i] + data['target'][i][:-1], dtype=np.uint16)).astype(np.int64)) for i in ix])
     y = torch.stack([torch.from_numpy((np.array(data['context'][i][1:] +  data['target'][i], dtype=np.uint16)).astype(np.int64)) for i in ix])
+    print(x, y)
     if device_type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
@@ -344,6 +346,7 @@ running_mfu = -1.0
 while True:
     # determine and set the learning rate for this iteration
     lr = get_lr(iter_num) if decay_lr else learning_rate
+    time.sleep(4)
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
@@ -371,7 +374,7 @@ while True:
                     'config': config,
                 }
                 print(f"saving checkpoint to {out_dir}")
-                torch.save(checkpoint, os.path.join(out_dir, 'ckpt_medical_finetune.pt'))
+                torch.save(checkpoint, os.path.join(out_dir, 'ckpt_out.pt'))
     if iter_num == 0 and eval_only:
         break
 
